@@ -836,12 +836,12 @@ router.post('/add-collection', uploadCollection.single('collection_image'), asyn
             return res.status(500).json({ message: 'Failed to upload image.', error: uploadError.message });
         }
 
-        // 3. Get public URL
+        // 3. Get public URL (with cache-buster)
         const { data: urlData } = supabase.storage
             .from('collection-images')
             .getPublicUrl(filename);
 
-        const imagePath = urlData.publicUrl;
+        const imagePath = `${urlData.publicUrl}?v=${Date.now()}`; // 👈 cache-buster
 
         // 4. Delete local temp file
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
@@ -868,6 +868,91 @@ router.post('/add-collection', uploadCollection.single('collection_image'), asyn
         if (req.file?.path && fs.existsSync(req.file.path)) {
             fs.unlinkSync(req.file.path);
         }
+        return res.status(500).json({ message: 'Internal server error.', error: err.message });
+    }
+});
+
+router.post('/update-collection', uploadCollection.single('collection_images'), async (req, res, next) => {
+    try {
+        const { collection_id, collection_title, collection_subtitle, is_active } = req.body;
+
+        if (!collection_id) return res.status(400).json({ message: 'collection_id is required.' });
+        if (!collection_title) return res.status(400).json({ message: 'collection_title is required.' });
+
+        // 1. Fetch current record
+        const { data: current, error: fetchError } = await supabase
+            .from('product_collection_master')
+            .select('*')
+            .eq('collection_id', collection_id)
+            .single();
+
+        if (fetchError || !current) {
+            return res.status(404).json({ message: 'Collection not found.' });
+        }
+
+        let imagePath = current.collection_images; // default: keep existing
+
+        if (req.file) {
+            // 2. Delete old image from Supabase Storage (if it exists)
+            if (current.collection_images) {
+                // Strip any query string (e.g. ?v=...) before extracting the filename
+                const cleanUrl = current.collection_images.split('?')[0];
+                const oldFilename = cleanUrl.split('/').pop();
+                await supabase.storage
+                    .from('collection-images')
+                    .remove([oldFilename]);
+            }
+
+            // 3. Upload new image to Supabase Storage
+            const ext = path.extname(req.file.originalname);
+            const newFilename = `collection_image_${collection_id}${ext}`;
+
+            const fileBuffer = fs.readFileSync(req.file.path);
+
+            const { error: uploadError } = await supabase.storage
+                .from('collection-images')
+                .upload(newFilename, fileBuffer, {
+                    contentType: req.file.mimetype,
+                    upsert: true,
+                });
+
+            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            if (uploadError) {
+                return res.status(500).json({ message: 'Image upload failed.', error: uploadError.message });
+            }
+
+            // 4. Get the public URL (with cache-buster)
+            const { data: urlData } = supabase.storage
+                .from('collection-images')
+                .getPublicUrl(newFilename);
+
+            imagePath = `${urlData.publicUrl}?v=${Date.now()}`; // 👈 cache-buster
+        }
+
+        // 5. Update the DB record
+        const { error: updateError } = await supabase
+            .from('product_collection_master')
+            .update({
+                collection_title,
+                collection_subtitle: collection_subtitle || null,
+                collection_images: imagePath,
+                is_active: is_active == 1 ? '1' : '0',
+                updated_at: new Date(),
+            })
+            .eq('collection_id', collection_id);
+
+        if (updateError) {
+            return res.status(500).json({ message: 'Failed to update collection.', error: updateError.message });
+        }
+
+        return res.status(200).json({
+            message: 'Collection updated successfully.',
+            collection_id,
+            collection_images: imagePath,
+        });
+
+    } catch (err) {
+        console.error('Unable to update collection:', err);
         return res.status(500).json({ message: 'Internal server error.', error: err.message });
     }
 });
@@ -904,89 +989,7 @@ router.get('/get-collection-by-id', async (req, res, next) => {
     }
 });
 
-router.post('/update-collection', uploadCollection.single('collection_images'), async (req, res, next) => {
-    try {
-        const { collection_id, collection_title, collection_subtitle, is_active } = req.body;
 
-        if (!collection_id) return res.status(400).json({ message: 'collection_id is required.' });
-        if (!collection_title) return res.status(400).json({ message: 'collection_title is required.' });
-
-        // 1. Fetch current record
-        const { data: current, error: fetchError } = await supabase
-            .from('product_collection_master')
-            .select('*')
-            .eq('collection_id', collection_id)
-            .single();
-
-        if (fetchError || !current) {
-            return res.status(404).json({ message: 'Collection not found.' });
-        }
-
-        let imagePath = current.collection_images; // default: keep existing
-
-        if (req.file) {
-            // 2. Delete old image from Supabase Storage (if it exists)
-            if (current.collection_images) {
-                // Extract just the filename from the full Supabase URL
-                const oldFilename = current.collection_images.split('/').pop();
-                await supabase.storage
-                    .from('collection-images')
-                    .remove([oldFilename]);
-            }
-
-            // 3. Upload new image to Supabase Storage
-            const ext = path.extname(req.file.originalname);
-            const newFilename = `collection_image_${collection_id}${ext}`;
-
-            const fileBuffer = fs.readFileSync(req.file.path);
-
-            const { error: uploadError } = await supabase.storage
-                .from('collection-images')
-                .upload(newFilename, fileBuffer, {
-                    contentType: req.file.mimetype,
-                    upsert: true,
-                });
-
-            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-            if (uploadError) {
-                return res.status(500).json({ message: 'Image upload failed.', error: uploadError.message });
-            }
-
-            // 4. Get the public URL
-            const { data: urlData } = supabase.storage
-                .from('collection-images')
-                .getPublicUrl(newFilename);
-
-            imagePath = urlData.publicUrl;
-        }
-
-        // 5. Update the DB record
-        const { error: updateError } = await supabase
-            .from('product_collection_master')
-            .update({
-                collection_title,
-                collection_subtitle: collection_subtitle || null,
-                collection_images: imagePath,
-                is_active: is_active == 1 ? '1' : '0',
-                updated_at: new Date(),
-            })
-            .eq('collection_id', collection_id);
-
-        if (updateError) {
-            return res.status(500).json({ message: 'Failed to update collection.', error: updateError.message });
-        }
-
-        return res.status(200).json({
-            message: 'Collection updated successfully.',
-            collection_id,
-            collection_images: imagePath,
-        });
-
-    } catch (err) {
-        console.error('Unable to update collection:', err);
-        return res.status(500).json({ message: 'Internal server error.', error: err.message });
-    }
-});
 
 //SETUP
 router.post('/add-setup', uploadSetup.fields([
@@ -999,16 +1002,15 @@ router.post('/add-setup', uploadSetup.fields([
         const categories = ['shirt', 'hoodie', 'bottoms', 'footwear'];
         const savedUrls = {};
 
-        // Helper: upload buffer to Supabase Storage, return public URL
         async function uploadToStorage(buffer, mimeType, filename) {
             const { error: uploadError } = await supabase.storage
-                .from('setup-images')          // ← your bucket name
+                .from('setup-images')
                 .upload(filename, buffer, { contentType: mimeType, upsert: true });
             if (uploadError) throw new Error(`Storage upload failed: ${uploadError.message}`);
             const { data: urlData } = supabase.storage
                 .from('setup-images')
                 .getPublicUrl(filename);
-            return urlData.publicUrl;
+            return `${urlData.publicUrl}?v=${Date.now()}`;   // 👈 same change here
         }
 
         // Upload each category file
@@ -1062,6 +1064,95 @@ router.post('/add-setup', uploadSetup.fields([
     } catch (err) {
         console.error('Unable to save setup images:', err);
         // Clean up any remaining temp files
+        if (req.files) {
+            Object.values(req.files).flat().forEach(file => {
+                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+            });
+        }
+        return res.status(500).json({ message: 'Internal server error.', error: err.message });
+    }
+});
+
+router.post('/update-setup', uploadSetup.fields([
+    { name: 'shirt', maxCount: 1 },
+    { name: 'hoodie', maxCount: 1 },
+    { name: 'bottoms', maxCount: 1 },
+    { name: 'footwear', maxCount: 1 },
+]), async (req, res, next) => {
+    try {
+        const categories = ['shirt', 'hoodie', 'bottoms', 'footwear'];
+
+        const hasFiles = categories.some(cat => req.files?.[cat]?.[0]);
+        if (!hasFiles) {
+            return res.status(400).json({ message: 'At least one image is required to update.' });
+        }
+
+        // There should only ever be one setup_image_master row
+        const { data: rows, error: fetchError } = await supabase
+            .from('setup_image_master')
+            .select('*')
+            .limit(1);
+
+        if (fetchError) {
+            return res.status(500).json({ message: 'Failed to fetch setup images.', error: fetchError.message });
+        }
+
+        const existing = rows?.[0] ?? null;
+        if (!existing) {
+            return res.status(404).json({ message: 'No setup images found. Use add-setup first.' });
+        }
+
+        async function uploadToStorage(buffer, mimeType, filename) {
+            const { error: uploadError } = await supabase.storage
+                .from('setup-images')
+                .upload(filename, buffer, { contentType: mimeType, upsert: true });
+            if (uploadError) throw new Error(`Storage upload failed: ${uploadError.message}`);
+            const { data: urlData } = supabase.storage
+                .from('setup-images')
+                .getPublicUrl(filename);
+            return `${urlData.publicUrl}?v=${Date.now()}`;
+        }
+
+        async function deleteFromStorage(publicUrl) {
+            if (!publicUrl) return;
+            const filename = publicUrl.split('/').pop();
+            await supabase.storage.from('setup-images').remove([filename]);
+        }
+
+        const updatedUrls = {};
+
+        for (const category of categories) {
+            if (req.files?.[category]?.[0]) {
+                const file = req.files[category][0];
+                const ext = path.extname(file.originalname);
+                const filename = `setup_${category}${ext}`;
+                const buffer = fs.readFileSync(file.path);
+
+                // Best-effort cleanup of the old file before uploading the new one
+                await deleteFromStorage(existing[category]);
+
+                updatedUrls[category] = await uploadToStorage(buffer, file.mimetype, filename);
+
+                fs.unlinkSync(file.path);
+            }
+        }
+
+        const { error: updateError } = await supabase
+            .from('setup_image_master')
+            .update({ ...updatedUrls, updated_at: new Date() })
+            .eq('setup_image_id', existing.setup_image_id);
+
+        if (updateError) {
+            return res.status(500).json({ message: 'Failed to update setup images.', error: updateError.message });
+        }
+
+        return res.status(200).json({
+            message: 'Setup images updated successfully.',
+            paths: updatedUrls,
+        });
+
+    } catch (err) {
+        console.error('Unable to update setup images:', err);
         if (req.files) {
             Object.values(req.files).flat().forEach(file => {
                 if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
