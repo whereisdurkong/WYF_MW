@@ -1,6 +1,6 @@
 const BASE_URL = process.env.API_BASE_URL || 'http://localhost:5000/api/product';
 const ENDPOINT = `${BASE_URL}/get-all-products`;
-const INTERVAL_MS = 5 * 1000; // 5 seconds
+const INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 async function fetchAllProducts() {
     const startedAt = new Date().toISOString();
@@ -17,6 +17,6 @@ async function fetchAllProducts() {
     }
 }
 
-// Run once on start, then every 5 seconds
+// Run once on start, then every 24 hours
 fetchAllProducts();
 setInterval(fetchAllProducts, INTERVAL_MS);
